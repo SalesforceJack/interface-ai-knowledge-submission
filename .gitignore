@@ -1,0 +1,10 @@
+# If this folder is promoted to the repository root, prevent event data leaks.
+snapshots_zip/
+snapshots/
+results/
+eval/
+harness/
+*.zip
+__pycache__/
+*.pyc
+.env
