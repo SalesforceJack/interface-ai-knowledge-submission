@@ -33,6 +33,25 @@ STOP = set('a an the for to by with i my me your yours our is are what whats whi
 WORD = re.compile(r"[a-z0-9]+(?:[-'][a-z0-9]+)*")
 NUM = re.compile(r"\d+(?:,\d{3})*(?:\.\d+)?\s*%")
 TERMS = re.compile(r'\b(6|10|12|15|17|18|20|24|30|36|48|60|72|84)[- ](?:months?|years?)\b',re.I)
+# Whole-word intent checks. Substring tests misread "learn" as "earn",
+# "automatic" as "auto", "financial" as "finance" and "April" as "APR".
+RATE_WORD = re.compile(r'\b(?:rates?|aprs?|apys?|interest)\b')
+SAVINGS_WORD = re.compile(r'\b(?:rates?|apys?|dividends?|tiers?|earn(?:s|ing|ings)?|yields?|balances?)\b')
+MONTH_WORD = re.compile(r'\bmonths?\b')
+FINANCE_WORD = re.compile(r'\bfinanc(?:e|ed|es|ing)\b')
+VEHICLE_WORD = re.compile(r'\b(?:autos?|automobiles?|vehicles?|cars?|motorcycles?|trucks?)\b')
+# Questions that mention a rate but do not ask for the published rate value.
+NOT_RATE_VALUE = re.compile(r'\brate locks?\b|\block(?:ing)?\b.{0,20}\brate\b|\btax\b|\bdeductible\b|\binsurance\b|\bgap\b|\b(?:calculated|computed|compounded)\b')
+# "Certificate" alone does not always mean a deposit product.
+OTHER_CERTIFICATE = re.compile(r'\b(?:birth|death|marriage|gift|stock)\s+certificates?\b')
+CERTIFICATE_POLICY = re.compile(r'\b(?:penalt(?:y|ies)|early withdrawal|renew(?:s|al)?|matur(?:e|es|ity))\b')
+# Enrolling in a digital service is not the same as joining the credit union.
+NOT_MEMBERSHIP_SIGNUP = re.compile(r'\b(?:online banking|mobile banking|shine|e-?statements?|estatements?|bill pay|alerts?|direct deposit)\b')
+# Being eligible for a product is not the same as membership eligibility.
+PRODUCT_ELIGIBILITY = re.compile(r'\b(?:loans?|mortgages?|cards?|refinanc\w*|grants?|certificates?|bonus|rebates?|discounts?)\b')
+# Mortgage programs that must match their own published row, never a fixed rate.
+MORTGAGE_PROGRAMS = (('FHA',r'\bfha\b'),('VA',r'\bva\b'),('USDA',r'\busda\b'),('adjustable-rate',r'\barm\b|\badjustable\b'))
+CARD_SUBRATES = re.compile(r'cash advance|balance transfer|penalty|introductory|\bintro\b|promotional')
 
 
 def norm(s):
@@ -109,6 +128,8 @@ class Engine:
             body_terms=set(tokens(p.markdown[:7000]))
             for w in t | body_terms:body_index[w].add(url)
         self.history.append({'id':snapshot.snapshot_id,'date':snapshot.taken_on,'pages':pages,'titles':titles,'postings':body_index})
+        # The contract does not promise chronological ingest order.
+        self.history.sort(key=lambda s:str(s['date']))
         self._conflicts=None
 
     def snap(self,as_of=None):
@@ -192,11 +213,12 @@ class Engine:
                     biz=self.page(sn,'business/cash-management')
                     if biz and biz.url!=p.url:a.sources.append(Source(biz.url,snapshot_id=sn['id']))
                     return a
-        if ('certificate' in q or re.search(r'\bcds?\b',q) or 'time deposit' in q) and any(x in q for x in ('link','url','website','where can i see','where do i find')):
+        deposit_certificate=('certificate' in q and not OTHER_CERTIFICATE.search(q)) or bool(re.search(r'\bcds?\b',q)) or 'time deposit' in q or 'share cert' in q
+        if deposit_certificate and any(x in q for x in ('link','url','website','where can i see','where do i find')):
             if savings:return self.sourced('Certificate and CD rates: https://www.dupaco.com/personal/savings-account#rates',savings,as_of)
         if ('branch' in q or 'atm' in q) and ('locator' in q or 'url' in q or 'link' in q or 'find' in q and 'location' in q):
             if contact:return self.sourced('Branch and ATM locator: https://www.dupaco.com/contact',contact,as_of)
-        if any(v in q for v in ('join','become a member','sign up','apply for membership','enroll','open membership')) and any(v in q for v in ('online','web','website','internet','url','link','sign up')):
+        if not NOT_MEMBERSHIP_SIGNUP.search(q) and (re.search(r'\bjoin\b',q) or any(v in q for v in ('become a member','sign up','apply for membership','enroll','open membership'))) and any(v in q for v in ('online','web','website','internet','url','link','sign up')):
             pg=self.page(sn,'about/join')
             if pg:
                 m=re.search(r'https://join\.dupaco\.com/?',pg.markdown)
@@ -204,29 +226,32 @@ class Engine:
 
         # Financial products: parse only the authoritative current (or date-specific)
         # published rate sheets. Keep tiers and APY/APR separate.
-        if 'certificate' in q or re.search(r'\bcds?\b',q) or 'time deposit' in q or 'share cert' in q:
+        wants_rate_value=not NOT_RATE_VALUE.search(q)
+        if deposit_certificate and (RATE_WORD.search(q) or not CERTIFICATE_POLICY.search(q)):
             ans=self.certificate(q,savings,as_of)
             if ans:return ans
-        if (any(x in q for x in ('share savings','bright savings','high-yield savings','high yield savings','health savings account','hsa','money market','investor\'s choice','you name it savings','launchpad','holiday club')) or ('savings' in q and any(x in q for x in ('rate','apy','dividend','tier','earn','yield','balance')))):
+        if (any(x in q for x in ('share savings','bright savings','high-yield savings','high yield savings','health savings account','money market','investor\'s choice','you name it savings','launchpad','holiday club')) or re.search(r'\bhsa\b',q) or ('savings' in q and SAVINGS_WORD.search(q))):
             ans=self.savings(q,savings,as_of)
             if ans:return ans
-        if ('checking' in q and any(x in q for x in ('rate','interest','apy','dividend'))):
+        if 'checking' in q and (RATE_WORD.search(q) or re.search(r'\bdividends?\b',q)):
             ans=self.checking(q,checking,as_of)
             if ans:return ans
-        if ('mortgage' in q or 'home loan' in q or (re.search(r'\b(?:15|20|30)[- ]year\b',q) and any(x in q for x in ('purchase','refinance','refi','home','fixed')))) and any(x in q for x in ('rate','apr','interest','fixed')):
+        if wants_rate_value and ('mortgage' in q or 'home loan' in q or re.search(r'\b(?:15|20|30)[- ]year\b|\b(?:fha|usda|arm)\b|\bva loan\b|\badjustable\b',q)) and (RATE_WORD.search(q) or re.search(r'\bfixed\b',q)):
             ans=self.mortgage(q,home,as_of)
             if ans:return ans
-        if (('auto' in q or 'vehicle' in q or bool(re.search(r'\bcar\b',q)) or 'motorcycle' in q or 'truck' in q) and (any(x in q for x in ('rate','apr','interest','month','financ')) or bool(re.search(r'\b(?:20\d{2}).*\b(?:\d{2})-month\b',q)))):
+        if wants_rate_value and VEHICLE_WORD.search(q) and (RATE_WORD.search(q) or MONTH_WORD.search(q) or FINANCE_WORD.search(q)):
             ans=self.loan(q,auto,'auto',as_of)
             if ans:return ans
-        if ('personal loan' in q or ('unsecured' in q and ('loan' in q or 'credit' in q))) and any(x in q for x in ('rate','apr','interest','month')):
+        if wants_rate_value and ('personal loan' in q or ('unsecured' in q and ('loan' in q or 'credit' in q))) and (RATE_WORD.search(q) or MONTH_WORD.search(q)):
             ans=self.loan(q,personal,'personal',as_of)
             if ans:return ans
-        if not any(x in q for x in ('wallet', 'apple pay', 'google pay', 'samsung pay')) and ('credit card' in q or 'visa' in q or 'platinum' in q or 'rewards' in q) and any(x in q for x in ('apr','rate','interest','offer','cards')):
+        if 'checking' not in q and not any(x in q for x in ('wallet', 'apple pay', 'google pay', 'samsung pay')) and ('credit card' in q or re.search(r'\bvisa\b',q) or 'platinum' in q or 'rewards' in q) and (RATE_WORD.search(q) or 'offer' in q or 'cards' in q):
             ans=self.credit_card(q,cards,bizcards,as_of)
             if ans:return ans
 
         # Branch details and changing closures.
+        if 'galena' in q and re.search(r'\bhours?\b|\bopen\b|\bclose[sd]?\b',q):
+            return self.branch_hours('galena',contact,as_of)
         if 'galena' in q and ('address' in q or 'where' in q or 'branch' in q):
             if contact:
                 m=re.search(r'\b\d{4,6}\s+Oldenburg[^\n]+',contact.markdown,re.I)
@@ -257,7 +282,7 @@ class Engine:
         if ('contact information' in q or 'update my information' in q or 'change my address' in q or 'update my phone' in q or 'change my phone' in q or 'change my mobile number' in q or ('contact detail' in q and ('change' in q or 'update' in q))):
             p=contact
             if p and '800-373-7600' in p.markdown:return self.sourced('Update your information using Shine Online/Mobile Banking, or call Dupaco at 800-373-7600.',p,as_of)
-        if ('eligible' in q or 'who can join' in q or 'membership' in q and 'who' in q or ('membership' in q and any(w in q for w in ('coverage','states','area','charter')))):
+        if (('eligible' in q and not PRODUCT_ELIGIBILITY.search(q)) or 'who can join' in q or 'membership' in q and 'who' in q or ('membership' in q and any(w in q for w in ('coverage','states','area','charter')))):
             p=self.page(sn,'about/join')
             if p:
                 if all(x in p.markdown for x in ('Iowa','Illinois','Wisconsin')):
@@ -290,12 +315,13 @@ class Engine:
         else:
             matches=[r for r in rows if ('jumbo' in r[0].lower())==wants_jumbo] if 'jumbo' in q else rows
         if not matches:return self.no('No published certificate matches the requested term and tier.',p,as_of)
-        if wants_jumbo and amount is not None:
+        if amount is not None:
             affordable=[]
             for r in matches:
-                minimum=float(re.sub(r'[^0-9.]','',r[3])) if len(r)>3 and re.search(r'\d',r[3]) else 100000
+                published=re.search(r'\d[\d,]*(?:\.\d+)?',r[3]) if len(r)>3 else None
+                minimum=float(published.group().replace(',','')) if published else (100000 if 'jumbo' in r[0].lower() else 0)
                 if amount>=minimum:affordable.append(r)
-            if not affordable:return self.no('The deposit is below the published minimum for this Jumbo Certificate.',p,as_of)
+            if not affordable:return self.no('The deposit is below the published minimum for this '+('Jumbo ' if wants_jumbo else '')+'Certificate.',p,as_of)
             matches=affordable
         texts=[]
         for r in matches[:30]:
@@ -320,7 +346,7 @@ class Engine:
         rows=[r for r,h,hd,i in tablerows(p) if kind in r[0].lower() and len(r)>=4]
         if not rows:return None
         bal=balance_amount(q)
-        if 'highest' in q or 'maximum' in q or 'top' in q:
+        if 'highest' in q or 'maximum' in q or re.search(r'\btop\b',q):
             matches=[max(rows,key=lambda r:float(pct(r[3]).rstrip('%')) if pct(r[3]) else -1)]
         elif bal is not None:
             matches=[]
@@ -404,6 +430,15 @@ class Engine:
         if not rows:return None
         refinance='refinan' in q or bool(re.search(r'\brefi\b',q))
         rows=[r for r in rows if r[0].lower().startswith('refinance:' if refinance else 'purchase:')]
+        # A named program must match its own row. Never substitute a fixed rate.
+        for label,pattern in MORTGAGE_PROGRAMS:
+            if re.search(pattern,q):
+                ratio=re.search(r'\b(\d{1,2}/\d{1,2})\b',q)
+                hits=[r for r in rows if re.search(pattern,r[0].lower()) and (not ratio or ratio.group(1) in r[0])]
+                if not hits:return self.no(f'A published {label} mortgage rate is not listed.',p,as_of)
+                row=hits[0]
+                name=re.sub(r'^(Purchase|Refinance):\s*','',row[0],flags=re.I)
+                return self.sourced(f'{name}: {pct(row[1])} mortgage interest rate, {pct(row[3])} APR.',p,as_of)
         m=re.search(r'\b(\d{2,3})[- ]?years?\b',q)
         years=m.group(1) if m else '30'
         rows=[r for r in rows if re.search(r'\b'+years+r'[- ]?year',r[0],re.I)]
@@ -430,7 +465,23 @@ class Engine:
                 text+=f' For {other[0]}, the rate is {pct(other[1])} and APR is {pct(other[3])}.'
         return self.sourced(text,p,as_of)
 
+    def card_subrate(self,kind,q,p,biz,as_of):
+        # A purchase APR must never answer a cash-advance or transfer question.
+        for pg in (p,biz):
+            if pg is None:continue
+            heading=''
+            for line in pg.markdown.splitlines():
+                if line.lstrip().startswith('#'):heading=line.lower()
+                if ('platinum' in q and 'rewards' in heading) or ('rewards' in q and 'platinum' in heading):continue
+                for sentence in re.split(r'(?<=[.!?])\s+',line):
+                    low=sentence.lower()
+                    if kind in low and 'apr' in low and pct(sentence):
+                        return self.sourced(_clean_text(sentence)[:240],pg,as_of)
+        return self.no(f'A published {kind} APR is not listed.',p or biz,as_of)
+
     def credit_card(self,q,p,biz,as_of):
+        subrate=CARD_SUBRATES.search(q)
+        if subrate:return self.card_subrate(subrate.group(0),q,p,biz,as_of)
         rows=[]
         for pg in (p,biz):
             for r,h,hd,i in tablerows(pg):
@@ -474,6 +525,18 @@ class Engine:
                 if pg.url not in [s.url for s in sources]:sources.append(Source(pg.url,snapshot_id=(self.snap(as_of) or {})['id']))
         if not texts:return None
         return Answer('; '.join(texts)+'.',sources,True)
+
+    def branch_hours(self,name,contact,as_of):
+        # Report only a schedule published beside this branch's own name.
+        lines=contact.markdown.splitlines() if contact else []
+        for i,line in enumerate(lines):
+            if name not in line.lower():continue
+            found=[]
+            for j,row in enumerate(lines[i:i+12]):
+                if j and row.lstrip().startswith('#'):break
+                if len(row)<130 and re.search(r'(?i)\b(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*\b',row):found.append(_clean_text(row))
+            if found:return self.sourced(f'{name.title()} branch hours: '+'; '.join(found)+'.',contact,as_of)
+        return self.no(f'A {name.title()} branch schedule is not listed.',contact,as_of)
 
     def hours(self,q,sn,as_of):
         p=self.page(sn,'newsroom/dupaco-celebrates-completion-of-newest-learning-lab')
@@ -643,6 +706,7 @@ class Engine:
             results.append(Conflict(topic=qualifier+' '+('APY' if 'savings' in path or 'checking' in path else 'APR/rate'),
                 values=unique,sources=[Source(pg.url,snapshot_id=sid) for _,pg,sid in obs[::max(1,len(obs)//3)]][:5],
                 resolution=last[0],reason='Same product and tier compared across snapshot dates; newest official rate table wins.'))
+        timeline_count=len(results)
         # Cross-page disagreements INSIDE the latest snapshot. A stale calculator
         # can contain an obsolete but otherwise valid term/model-year table.
         latest=self.snap()
@@ -726,7 +790,8 @@ class Engine:
             results.append(Conflict(topic=label,values=vals,
                 sources=[Source(pg.url,snapshot_id=sid) for v,pg,sid in obs[:3]],
                 resolution=latest[0],reason='The newer snapshot of the same published fact supersedes the earlier value.'))
-        self._conflicts=results[:200]
+        # Routine rate changes must not crowd real disagreements out of the cap.
+        self._conflicts=(results[timeline_count:]+results[:timeline_count])[:200]
         return self._conflicts
 
 
@@ -735,6 +800,12 @@ def build():
 
 # Question canonicalization is independent of the visible evaluation questions.
 _MONTHS = {n: i for i, n in enumerate(('january','february','march','april','may','june','july','august','september','october','november','december'), 1)}
+_MONTHS.update({n[:3]: i for n, i in list(_MONTHS.items())})
+_MONTHS['sept'] = 9
+# "apr 2026" is usually the rate plus a model year, so bare "apr" stays out of
+# this list. It counts as April only with a day or an explicit date preposition.
+_MONTH_NAMES = '|'.join(sorted((n for n in _MONTHS if n != 'apr'), key=len, reverse=True))
+_APRIL_ABBR = r'(?:(?<=\bin )|(?<=\bon )|(?<=\bof )|(?<=\bby )|(?<=\bduring )|(?<=\bfrom ))apr|apr(?=\.?\s+\d{1,2}(?:st|nd|rd|th)?\s*,?\s*20\d{2})'
 _NWORDS = {'one':1,'two':2,'three':3,'four':4,'five':5,'six':6,'seven':7,'eight':8,'nine':9,'ten':10,'twelve':12,'fifteen':15,'seventeen':17,'eighteen':18,'twenty':20,'twenty-four':24,'thirty':30,'thirty-six':36,'forty-eight':48,'sixty':60,'seventy-two':72,'eighty-four':84}
 
 def normalize_question(question):
@@ -754,7 +825,8 @@ def normalize_question(question):
     def numeric_term(m):
         n=int(m.group(1));unit=m.group(2)
         if unit.startswith('yr') or unit.startswith('year'):
-            return f'{n}-year' if mortgage_context else f'{n*12}-month'
+            # No deposit or vehicle product runs 15+ years, so keep mortgage terms.
+            return f'{n}-year' if mortgage_context or n in (15,20,30) else f'{n*12}-month'
         return f'{n}-month'
     text=re.sub(r'\b(\d{1,3})\s*[- ]?\s*(months?|mos?\.?|years?|yrs?\.?)\b',numeric_term,text)
     # Spellings of wallet names used in informal English.
@@ -768,45 +840,62 @@ def normalize_question(question):
     return text
 
 def mentioned_date(q):
+    from datetime import date, timedelta
+    found=_explicit_date(q)
+    if not found:return None
+    value,start=found
+    # "before June 2026" excludes June itself, so step back from the period start.
+    if re.search(r'\b(?:before|prior to)\s+(?:the\s+)?$',q[:start]):
+        day=date.fromisoformat(value)
+        first=day.replace(day=1) if _is_month_only(q,start) else day
+        return (first-timedelta(days=1)).isoformat()
+    return value
+
+
+def _is_month_only(q,start):
+    return not re.match(r'\S+\.?\s+\d{1,2}(?:st|nd|rd|th)?\s*,?\s*20\d{2}|\d{1,2}[/\-]\d{1,2}[/\-]|20\d{2}-\d{2}-\d{2}|\d{1,2}(?:st|nd|rd|th)?\s',q[start:])
+
+
+def _explicit_date(q):
     from calendar import monthrange
     from datetime import date
     m=re.search(r'\b(20\d{2})-(\d{2})-(\d{2})\b',q)
     if m:
-        try:return date(*map(int,m.groups())).isoformat()
+        try:return date(*map(int,m.groups())).isoformat(),m.start()
         except ValueError:return None
-    names='|'.join(_MONTHS)
-    m=re.search(r'\b('+names+r')\s+(?:(\d{1,2})(?:st|nd|rd|th)?\s*,?\s*)?(20\d{2})\b',q)
+    names=_MONTH_NAMES+'|'+_APRIL_ABBR
+    m=re.search(r'\b('+names+r')\.?\s+(?:(\d{1,2})(?:st|nd|rd|th)?\s*,?\s*)?(20\d{2})\b',q)
     if m:
         month=_MONTHS[m.group(1)];year=int(m.group(3));day=int(m.group(2)) if m.group(2) else monthrange(year,month)[1]
-        try:return date(year,month,day).isoformat()
+        try:return date(year,month,day).isoformat(),m.start()
         except ValueError:return None
     # Both MM/DD/YYYY and MM-YYYY, or YYYY-MM; interpret a month-only
     # request as the last day of that month so the latest available crawl wins.
-    m=re.search(r'\b(\d{1,2})[/\-](\d{1,2})[/\-](20\d{2})\b',q)
+    m=re.search(r'\b(\d{1,2})[/\-](\d{1,2})[/\-](20\d{2})\b',q) or re.search(r'\b(\d{1,2})/(\d{1,2})/(\d{2})\b',q)
     if m:
         mo,day,yr=map(int,m.groups())
-        try:return date(yr,mo,day).isoformat()
+        yr=yr+2000 if yr<100 else yr
+        try:return date(yr,mo,day).isoformat(),m.start()
         except ValueError:return None
     m=re.search(r'\b(20\d{2})[/\-](\d{1,2})(?![/\-]\d)\b',q)
     if m:
         yr,mo=map(int,m.groups())
-        try:return date(yr,mo,monthrange(yr,mo)[1]).isoformat()
+        try:return date(yr,mo,monthrange(yr,mo)[1]).isoformat(),m.start()
         except ValueError:return None
     m=re.search(r'\b(\d{1,2})[/\-](20\d{2})\b',q)
     if m:
         mo,yr=map(int,m.groups())
-        try:return date(yr,mo,monthrange(yr,mo)[1]).isoformat()
+        try:return date(yr,mo,monthrange(yr,mo)[1]).isoformat(),m.start()
         except ValueError:return None
-    m=re.search(r'\b(\d{1,2})(?:st|nd|rd|th)?\s+('+names+r')\s+(20\d{2})\b',q)
+    m=re.search(r'\b(\d{1,2})(?:st|nd|rd|th)?\s+('+_MONTH_NAMES+r'|apr)\.?\s+(20\d{2})\b',q)
     if m:
         day=int(m.group(1));mo=_MONTHS[m.group(2)];yr=int(m.group(3))
-        try:return date(yr,mo,day).isoformat()
+        try:return date(yr,mo,day).isoformat(),m.start()
         except ValueError:return None
     return None
 
 def vehicle_year(q):
-    names='|'.join(_MONTHS)
-    s=re.sub(r'\b(?:'+names+r')\s+(?:\d{1,2},?\s*)?20\d{2}\b',' ',q)
+    s=re.sub(r'\b(?:'+_MONTH_NAMES+'|'+_APRIL_ABBR+r')\.?\s+(?:\d{1,2},?\s*)?20\d{2}\b',' ',q)
     s=re.sub(r'\b20\d{2}-\d{2}-\d{2}\b',' ',s)
     candidates=[(int(m.group()),m.start(),m.end()) for m in re.finditer(r'\b20\d{2}\b',s)]
     if not candidates:return None

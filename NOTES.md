@@ -30,3 +30,15 @@ Target runtime: Python 3.11, standard library only. Local execution was verified
 Another 336 locally authored, snapshot-grounded tests were added (261 surface variations plus 75 separately authored edge tests). They exercise abbreviated durations (`60 mo`, `10m`, `five yrs`), colloquial amounts (`15k`, `200k`, `15 grand`), alternate date spellings, 2026 snapshot transitions, auto model-year buckets, savings balance boundaries, mortgage amount thresholds, non-existent terms, certificate minimums, and explicit before-versus-now comparisons. All 336 pass after corrections. The pre-correction audited implementation passed 176 of the first 261; these are regression checks refined while repairing known failures, not an independently hidden test.
 
 The separate testing package is intentionally excluded from the submission ZIP and repository. The actual hackathon data and internal gold labels remain unavailable to third-party viewers; do not commit the `snapshots` or `snapshots_zip` directories.
+
+## Generalization fixes (November 7, 2026)
+
+A code review found failures that the earlier tests missed, so question handling was tightened:
+
+- Dates: abbreviated months (`Feb 2026`, `Jan 20, 2026`), two-digit years (`2/1/26`), and `before`/`prior to` now select the right snapshot. Bare `apr 2026` stays a rate plus a model year, not April.
+- Routing: intent checks use whole words, so `automatic`, `financial`, `learn`, and `April` no longer trigger rate answers. Birth or gift certificates, online banking enrollment, product eligibility, rate locks, tax, and insurance questions leave the rate and membership paths.
+- Products: FHA, VA, USDA, and adjustable mortgages must match their own published row or the engine declines. Cash advance, balance transfer, penalty, and intro questions no longer receive the purchase APR. Standard certificates now honor published minimums, and `30 year rate` reaches the mortgage table.
+- Branches: Galena hours come from a schedule printed beside the branch name, or the engine declines.
+- Robustness: snapshots are sorted by date at ingest, and cross-page conflicts come before routine rate changes under the 200-item cap.
+
+These changes were checked only on a synthetic fixture modeled on the table formats this code parses: 31/31 targeted probes, 23/23 further probes written after the fixes, and 205 older-style questions with unchanged answers. **The public scorer and the 336 variation tests were not rerun because the participant kit was unavailable, so the validation figures above and `TEST_RESULTS.json` describe the previous commit.**
