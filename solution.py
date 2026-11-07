@@ -135,7 +135,9 @@ class Engine:
     def snap(self,as_of=None):
         if not self.history:return None
         if not as_of:return self.history[-1]
-        eligible=[s for s in self.history if s['date']<=str(as_of)[:10]]
+        key=date_key(as_of)
+        if key is None:return None
+        eligible=[s for s in self.history if str(s['date'])[:10]<=key]
         return eligible[-1] if eligible else None
 
     def page(self,snap,path):
@@ -181,7 +183,7 @@ class Engine:
             if derived:
                 as_of=derived
                 sn=self.snap(as_of)
-                if not sn:return self.no('The requested date predates the first supplied snapshot.',as_of=as_of)
+                if not sn:return self.no('The requested date is invalid or predates the first supplied snapshot.',as_of=as_of)
         qt=set(tokens(q))
         is_business=bool(re.search(r'\bbusiness\b',q))
         savings=self.page(sn,'business/savings-accounts' if is_business else 'personal/savings-account')
@@ -213,12 +215,13 @@ class Engine:
                     biz=self.page(sn,'business/cash-management')
                     if biz and biz.url!=p.url:a.sources.append(Source(biz.url,snapshot_id=sn['id']))
                     return a
-        deposit_certificate=('certificate' in q and not OTHER_CERTIFICATE.search(q)) or bool(re.search(r'\bcds?\b',q)) or 'time deposit' in q or 'share cert' in q
+        deposit_certificate=('certificate' in q and not OTHER_CERTIFICATE.search(q)) or ('jumbo' in q and not re.search(r'\bmortgages?\b|\bloans?\b',q)) or bool(re.search(r'\bcds?\b',q)) or 'time deposit' in q or 'share cert' in q
         if deposit_certificate and any(x in q for x in ('link','url','website','where can i see','where do i find')):
             if savings:return self.sourced('Certificate and CD rates: https://www.dupaco.com/personal/savings-account#rates',savings,as_of)
         if ('branch' in q or 'atm' in q) and ('locator' in q or 'url' in q or 'link' in q or 'find' in q and 'location' in q):
             if contact:return self.sourced('Branch and ATM locator: https://www.dupaco.com/contact',contact,as_of)
-        if not NOT_MEMBERSHIP_SIGNUP.search(q) and (re.search(r'\bjoin\b',q) or any(v in q for v in ('become a member','sign up','apply for membership','enroll','open membership'))) and any(v in q for v in ('online','web','website','internet','url','link','sign up')):
+        who_can_join=bool(re.search(r'\bwho\b|\beligible\b|\bqualif',q))
+        if not who_can_join and not NOT_MEMBERSHIP_SIGNUP.search(q) and (re.search(r'\bjoin\b',q) or any(v in q for v in ('become a member','sign up','apply for membership','enroll','open membership'))) and any(v in q for v in ('online','web','website','internet','url','link','sign up')):
             pg=self.page(sn,'about/join')
             if pg:
                 m=re.search(r'https://join\.dupaco\.com/?',pg.markdown)
@@ -251,7 +254,7 @@ class Engine:
 
         # Branch details and changing closures.
         if 'galena' in q and re.search(r'\bhours?\b|\bopen\b|\bclose[sd]?\b',q):
-            return self.branch_hours('galena',contact,as_of)
+            return self.branch_hours('galena',contact,as_of,'drive' if 'drive-up' in q else None)
         if 'galena' in q and ('address' in q or 'where' in q or 'branch' in q):
             if contact:
                 m=re.search(r'\b\d{4,6}\s+Oldenburg[^\n]+',contact.markdown,re.I)
@@ -265,24 +268,26 @@ class Engine:
                     if any(x in q for x in ('where','full-service','services','alternative','other branch','go for')):
                         return self.sourced('Members can use the Key West and Sycamore Street branches for full-service banking.',p,as_of)
                     return self.sourced('The Hy-Vee branch was scheduled to close '+when+'. It is no longer open after that date. Full-service alternatives are Key West and Sycamore Street.',p,as_of)
-        if 'lobby' in q and 'hour' in q or 'drive-up' in q and 'hour' in q or 'drive up hour' in q:
+        if ('lobby' in q or 'drive-up' in q) and re.search(r'\bhours?\b|\bopen\b|\bschedules?\b',q):
             return self.hours(q,sn,as_of)
         if (('branch' in q or 'location' in q or 'office' in q) and ('how many' in q or 'number of' in q or 'count' in q or 'total' in q or 'amount of' in q)):
             a=self.count_branches(sn,as_of)
             if a:return a
-        if 'forbes' in q and ('recogn' in q or 'award' in q or 'time' in q or 'rank' in q):
+        if 'forbes' in q:
             a=self.forbes(sn,as_of)
             if a:return a
-        if ('volunteer' in q or 'vto' in q) and ('employees' in q or 'how many' in q):
+        if ('volunteer' in q or re.search(r'\bvto\b',q)) and re.search(r'\bemployees?\b|\bstaff\b|\bworkers?\b|how many|number of',q):
             a=self.volunteer(sn,as_of)
             if a:return a
         if 'home$tart' in q or 'home$start' in q or 'homestart' in q or 'home start program' in q:
             a=self.homestart(sn,as_of)
             if a:return a
-        if ('contact information' in q or 'update my information' in q or 'change my address' in q or 'update my phone' in q or 'change my phone' in q or 'change my mobile number' in q or ('contact detail' in q and ('change' in q or 'update' in q))):
+        if (re.search(r'\b(?:change|update|modify|edit|correct|fix)\b.{0,30}\b(?:contact|address|phone|mobile|email)\b',q) or 'contact information' in q or 'update my information' in q or 'change my address' in q or 'update my phone' in q or 'change my phone' in q or 'change my mobile number' in q or ('contact detail' in q and ('change' in q or 'update' in q))):
             p=contact
             if p and '800-373-7600' in p.markdown:return self.sourced('Update your information using Shine Online/Mobile Banking, or call Dupaco at 800-373-7600.',p,as_of)
-        if (('eligible' in q and not PRODUCT_ELIGIBILITY.search(q)) or 'who can join' in q or 'membership' in q and 'who' in q or ('membership' in q and any(w in q for w in ('coverage','states','area','charter')))):
+        if re.search(r'phone number|phone#|telephone',q) and not re.search(r'\b(?:lost|stolen|fraud|update|change|branch)\b',q) or re.search(r'how (?:do|can) i (?:call|reach|contact)\b',q):
+            if contact and '800-373-7600' in contact.markdown:return self.sourced('Call Dupaco at 800-373-7600.',contact,as_of)
+        if (('eligible' in q and not PRODUCT_ELIGIBILITY.search(q)) or 'who can join' in q or 'become a member' in q or (re.search(r'\bstates?\b',q) and re.search(r'\bjoin\b',q)) or (re.search(r'\bqualif',q) and re.search(r'\bjoin\b|\bmember',q)) or 'membership' in q and 'who' in q or ('membership' in q and any(w in q for w in ('coverage','states','area','charter')))):
             p=self.page(sn,'about/join')
             if p:
                 if all(x in p.markdown for x in ('Iowa','Illinois','Wisconsin')):
@@ -305,7 +310,7 @@ class Engine:
         m=re.search(r'\b(\d{1,2})[- ]?months?\b',q)
         term=m.group(1) if m else None
         amount=balance_amount(q)
-        explicit_standard=any(v in q for v in ('standard','regular','non-jumbo','non jumbo','nonjumbo'))
+        explicit_standard=any(v in q for v in ('standard','regular','non-jumbo','non jumbo','nonjumbo')) or bool(re.search(r"\b(?:not|no|without|excluding|don't want)\b[^.?!]{0,15}\bjumbo\b",q))
         wants_jumbo=('jumbo' in q and not explicit_standard) or (not explicit_standard and 'jumbo' not in q and amount is not None and amount>=100000)
         if term:
             matches=[r for r in rows if re.search(r'\b'+term+r'\s*month',r[0],re.I)]
@@ -434,7 +439,8 @@ class Engine:
         for label,pattern in MORTGAGE_PROGRAMS:
             if re.search(pattern,q):
                 ratio=re.search(r'\b(\d{1,2}/\d{1,2})\b',q)
-                hits=[r for r in rows if re.search(pattern,r[0].lower()) and (not ratio or ratio.group(1) in r[0])]
+                term=re.search(r'\b(\d{2})-year\b',q)
+                hits=[r for r in rows if re.search(pattern,r[0].lower()) and (not ratio or ratio.group(1) in r[0]) and (not term or term.group(1)+'-year' in r[0].lower())]
                 if not hits:return self.no(f'A published {label} mortgage rate is not listed.',p,as_of)
                 row=hits[0]
                 name=re.sub(r'^(Purchase|Refinance):\s*','',row[0],flags=re.I)
@@ -475,6 +481,7 @@ class Engine:
                 if ('platinum' in q and 'rewards' in heading) or ('rewards' in q and 'platinum' in heading):continue
                 for sentence in re.split(r'(?<=[.!?])\s+',line):
                     low=sentence.lower()
+                    if ('platinum' in q and 'rewards' in low) or ('rewards' in q and 'platinum' in low):continue
                     if kind in low and 'apr' in low and pct(sentence):
                         return self.sourced(_clean_text(sentence)[:240],pg,as_of)
         return self.no(f'A published {kind} APR is not listed.',p or biz,as_of)
@@ -526,7 +533,7 @@ class Engine:
         if not texts:return None
         return Answer('; '.join(texts)+'.',sources,True)
 
-    def branch_hours(self,name,contact,as_of):
+    def branch_hours(self,name,contact,as_of,must=None):
         # Report only a schedule published beside this branch's own name.
         lines=contact.markdown.splitlines() if contact else []
         for i,line in enumerate(lines):
@@ -534,7 +541,7 @@ class Engine:
             found=[]
             for j,row in enumerate(lines[i:i+12]):
                 if j and row.lstrip().startswith('#'):break
-                if len(row)<130 and re.search(r'(?i)\b(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*\b',row):found.append(_clean_text(row))
+                if len(row)<130 and re.search(r'(?i)\b(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*\b',row) and (not must or must in row.lower()):found.append(_clean_text(row))
             if found:return self.sourced(f'{name.title()} branch hours: '+'; '.join(found)+'.',contact,as_of)
         return self.no(f'A {name.title()} branch schedule is not listed.',contact,as_of)
 
@@ -608,7 +615,7 @@ class Engine:
         for raw in page.markdown.splitlines():
             if not raw or len(raw)<20 or raw.startswith('|') or raw.startswith('!['):continue
             line=_clean_text(raw)
-            if len(line)>1600:continue
+            if len(line)>1600 or line.endswith('?') or line[:1] in ('“','"','[',']'):continue
             w=set(tokens(line));sc=len(q&w)/(len(q)+0.5)+min(2,len(w & q))
             if re.search(r'(?:\d[\d.,]*\s*%|\$[\d,.]+)',line) and len(q&w)>=2:sc+=0.75
             if 'offer ended' in line.lower() or 'expires' in line.lower():sc-=2
@@ -808,8 +815,36 @@ _MONTH_NAMES = '|'.join(sorted((n for n in _MONTHS if n != 'apr'), key=len, reve
 _APRIL_ABBR = r'(?:(?<=\bin )|(?<=\bon )|(?<=\bof )|(?<=\bby )|(?<=\bduring )|(?<=\bfrom ))apr|apr(?=\.?\s+\d{1,2}(?:st|nd|rd|th)?\s*,?\s*20\d{2})'
 _NWORDS = {'one':1,'two':2,'three':3,'four':4,'five':5,'six':6,'seven':7,'eight':8,'nine':9,'ten':10,'twelve':12,'fifteen':15,'seventeen':17,'eighteen':18,'twenty':20,'twenty-four':24,'thirty':30,'thirty-six':36,'forty-eight':48,'sixty':60,'seventy-two':72,'eighty-four':84}
 
+# Member shorthand and one-edit typos of domain words, applied before routing.
+_SHORTHAND = {'hrs':'hours','hr':'hour','cc':'credit card','ccs':'credit cards','info':'information','ur':'your','acct':'account','accts':'accounts','mtg':'mortgage','cert':'certificate','certs':'certificates'}
+_DOMAIN_WORDS = ('certificate','certificates','routing','lobby','credit','eligible','mortgage','savings','checking','platinum','rewards','refinance','branch','balance','dividend','interest','membership','vehicle','motorcycle','galena','volunteer','forbes','jumbo')
+_REAL_WORDS = {'crest','edit','credits','branches','checkin','saving','mortgages','rewarded'}
+
+
+def _one_edit(a,b):
+    # Damerau-Levenshtein distance of exactly one: insert, delete, replace, or swap.
+    if a==b or abs(len(a)-len(b))>1:return False
+    if len(a)>len(b):a,b=b,a
+    i=0
+    while i<len(a) and a[i]==b[i]:i+=1
+    if len(a)==len(b):
+        return a[i+1:]==b[i+1:] or (i+1<len(a) and a[i]==b[i+1] and a[i+1]==b[i] and a[i+2:]==b[i+2:])
+    return a[i:]==b[i+1:]
+
+
+def _fix_word(m):
+    w=m.group()
+    if w in _SHORTHAND:return _SHORTHAND[w]
+    if len(w)<5 or w in _REAL_WORDS or w in _DOMAIN_WORDS:return w
+    for known in _DOMAIN_WORDS:
+        if w[0]==known[0] and _one_edit(w,known):return known
+    return w
+
+
 def normalize_question(question):
     text=str(question).lower().replace('’', "'").replace('–','-').replace('—','-').replace('‑','-')
+    text=re.sub(r'[a-z]+',_fix_word,text)
+    text=re.sub(r'\bdrive[- ]?(?:through|thru|up)\b','drive-up',text)
     words='|'.join(sorted((re.escape(w) for w in _NWORDS),key=len,reverse=True))
     def replace_term(m):
         n=_NWORDS[m.group(1)];unit=m.group(2)
@@ -839,11 +874,24 @@ def normalize_question(question):
     text=re.sub(r'\b(\d{1,3})m\b',lambda m:f'{int(m.group(1))}-month',text)
     return text
 
+INVALID_DATE='0000-00-00'  # sorts before every snapshot, so such a date is declined
+
+
+def date_key(value):
+    # Accepts date objects and padded or unpadded ISO text; anything else is invalid.
+    from datetime import date
+    m=re.match(r'\s*(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?!\d)',str(value))
+    if not m:return None
+    try:return date(*map(int,m.groups())).isoformat()
+    except ValueError:return None
+
+
 def mentioned_date(q):
     from datetime import date, timedelta
     found=_explicit_date(q)
     if not found:return None
     value,start=found
+    if value==INVALID_DATE:return value
     # "before June 2026" excludes June itself, so step back from the period start.
     if re.search(r'\b(?:before|prior to)\s+(?:the\s+)?$',q[:start]):
         day=date.fromisoformat(value)
@@ -859,24 +907,30 @@ def _is_month_only(q,start):
 def _explicit_date(q):
     from calendar import monthrange
     from datetime import date
-    m=re.search(r'\b(20\d{2})-(\d{2})-(\d{2})\b',q)
+    m=re.search(r'\b(20\d{2})[-/](\d{1,2})[-/](\d{1,2})\b',q)
     if m:
         try:return date(*map(int,m.groups())).isoformat(),m.start()
-        except ValueError:return None
+        except ValueError:return INVALID_DATE,m.start()
+    m=re.search(r'\b(\d{1,2})(?:st|nd|rd|th)?\s+('+_MONTH_NAMES+r'|apr)\.?\s+(20\d{2})\b',q)
+    if m:
+        day=int(m.group(1));mo=_MONTHS[m.group(2)];yr=int(m.group(3))
+        try:return date(yr,mo,day).isoformat(),m.start()
+        except ValueError:return INVALID_DATE,m.start()
     names=_MONTH_NAMES+'|'+_APRIL_ABBR
     m=re.search(r'\b('+names+r')\.?\s+(?:(\d{1,2})(?:st|nd|rd|th)?\s*,?\s*)?(20\d{2})\b',q)
     if m:
         month=_MONTHS[m.group(1)];year=int(m.group(3));day=int(m.group(2)) if m.group(2) else monthrange(year,month)[1]
         try:return date(year,month,day).isoformat(),m.start()
-        except ValueError:return None
+        except ValueError:return INVALID_DATE,m.start()
     # Both MM/DD/YYYY and MM-YYYY, or YYYY-MM; interpret a month-only
     # request as the last day of that month so the latest available crawl wins.
     m=re.search(r'\b(\d{1,2})[/\-](\d{1,2})[/\-](20\d{2})\b',q) or re.search(r'\b(\d{1,2})/(\d{1,2})/(\d{2})\b',q)
     if m:
         mo,day,yr=map(int,m.groups())
         yr=yr+2000 if yr<100 else yr
+        if mo>12 and day<=12:mo,day=day,mo  # 15/01/2026 can only be day-first
         try:return date(yr,mo,day).isoformat(),m.start()
-        except ValueError:return None
+        except ValueError:return INVALID_DATE,m.start()
     m=re.search(r'\b(20\d{2})[/\-](\d{1,2})(?![/\-]\d)\b',q)
     if m:
         yr,mo=map(int,m.groups())
@@ -886,11 +940,6 @@ def _explicit_date(q):
     if m:
         mo,yr=map(int,m.groups())
         try:return date(yr,mo,monthrange(yr,mo)[1]).isoformat(),m.start()
-        except ValueError:return None
-    m=re.search(r'\b(\d{1,2})(?:st|nd|rd|th)?\s+('+_MONTH_NAMES+r'|apr)\.?\s+(20\d{2})\b',q)
-    if m:
-        day=int(m.group(1));mo=_MONTHS[m.group(2)];yr=int(m.group(3))
-        try:return date(yr,mo,day).isoformat(),m.start()
         except ValueError:return None
     return None
 

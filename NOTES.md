@@ -41,4 +41,13 @@ A code review found failures that the earlier tests missed, so question handling
 - Branches: Galena hours come from a schedule printed beside the branch name, or the engine declines.
 - Robustness: snapshots are sorted by date at ingest, and cross-page conflicts come before routine rate changes under the 200-item cap.
 
-These changes were checked only on a synthetic fixture modeled on the table formats this code parses: 31/31 targeted probes, 23/23 further probes written after the fixes, and 205 older-style questions with unchanged answers. **The public scorer and the 336 variation tests were not rerun because the participant kit was unavailable, so the validation figures above and `TEST_RESULTS.json` describe the previous commit.**
+A second pass added shorthand and one-edit typo handling (`hrs`, `cc`, `routng`), unpadded and day-first dates, declines for invalid dates and invalid `as_of` values, a general phone route, and stricter fallback quoting.
+
+Results on the real snapshots with the official scorer, previous commit versus this version:
+
+- Public set (40): 0.969 and 0.969. Bundled self-test: 1.0.
+- Generated as-of questions from real rate tables, four date spellings (164): 0.695 and 1.000; stale values fell from 50 to 0.
+- Reworded public questions used during fixing (160): 0.847 and 0.969. This set was tuned against, so it is not held out.
+- Held-out rewordings written without seeing the code (200): 0.952 and 0.958.
+
+**Limits:** the reworded sets restate the 40 public facts, so they do not measure topics absent from the public set. No conflict gold set exists for the real data, so the 15% conflicts pillar remains unmeasured; the engine reports 36 conflicts. Multi-part questions still answer only the first part, and year-only dates such as `in 2025` are not parsed because they collide with facts such as `in 2023`. No hidden score is claimed. `TEST_RESULTS.json` describes the previous commit.
